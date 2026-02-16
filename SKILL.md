@@ -1,6 +1,6 @@
 ---
 name: control-server
-description: Executar comandos e scripts no servidor onde o agente está hospedado. Ativa quando o usuário diz "seu servidor", "seu server", "sua máquina", "execute", "instale", "configure", "atualize", "reinicie", "verifique o status", "rode o comando", "faça no server", ou pede para instalar pacotes, gerenciar serviços, verificar logs, checar disco, memória, CPU, ou qualquer administração do sistema. Também ativa quando o usuário pede para rodar um script bash, python ou qualquer comando no terminal.
+description: Executar comandos, criar scripts, analisar logs e resolver problemas no servidor onde o agente está hospedado. Ativa quando o usuário diz "seu servidor", "seu server", "sua máquina", "execute", "instale", "configure", "atualize", "reinicie", "verifique o status", "rode o comando", "faça no server", "verifica os logs", "tem algum erro", "tá fora do ar", "diagnostica", "health check", "resolve isso", "arruma", "fix it", "cria um script", ou pede para instalar pacotes, gerenciar serviços, verificar logs, checar disco, memória, CPU, diagnosticar problemas, ou qualquer administração do sistema.
 metadata: { "openclaw": { "emoji": "🖥️", "requires": { "bins": ["bash"] } } }
 ---
 
@@ -145,7 +145,201 @@ Se o usuário disser algo como "pode executar sem perguntar" ou "confia", isso e
 
 Se o usuário disser "sempre peça confirmação", resete o nível para pedir confirmação em tudo.
 
-## Tratamento de Erros
+## Criação de Scripts
+
+O agente pode criar scripts novos quando o usuário pedir. Exemplos: automações, backups, monitoramento, tarefas repetitivas, etc.
+
+### Regras para criar scripts:
+
+1. **SEMPRE** salvar em `~/scripts/` (criar a pasta se não existir com `mkdir -p ~/scripts/`)
+2. **SEMPRE** mostrar o código completo ao usuário ANTES de salvar
+3. **SEMPRE** explicar o que cada parte do script faz, em linguagem simples
+4. **SEMPRE** pedir confirmação antes de salvar e executar
+5. **SEMPRE** tornar o script executável após salvar (`chmod +x`)
+6. **SEMPRE** colocar um comentário no topo do script explicando o que ele faz
+7. **NUNCA** criar scripts em pastas do sistema (`/etc/`, `/usr/`, `/bin/`, etc.)
+8. **NUNCA** colocar senhas ou chaves diretamente no script — usar variáveis de ambiente
+
+### Fluxo de criação:
+
+```
+1. Usuário pede: "Cria um script que faz backup do banco de dados"
+2. Agente escreve o código
+3. Agente mostra ao usuário:
+
+📝 Criei um script para fazer backup do banco de dados.
+
+Arquivo: ~/scripts/backup_db.sh
+O que faz: Exporta o banco de dados MySQL para um arquivo .sql com a data de hoje
+
+--- Código ---
+[mostra o código completo]
+--- Fim ---
+
+Quer que eu salve e execute? (sim/não)
+
+4. Se sim → salva, dá permissão de execução, e roda
+5. Se não → pergunta o que quer alterar
+```
+
+### Nomeação de scripts:
+- Nome descritivo em lowercase com underscores: `backup_db.sh`, `monitor_nginx.py`, `limpar_logs.sh`
+- Extensão correta: `.sh` para Bash, `.py` para Python
+- Se já existir um script com o mesmo nome, avisar o usuário antes de sobrescrever
+
+### Se o usuário pedir para agendar o script (cronjob):
+- Isso é Nível 3 — SEMPRE pedir confirmação
+- Mostrar a linha do crontab e explicar o horário em linguagem simples
+- Exemplo: "Vai rodar todo dia às 3 da manhã"
+
+## Análise de Logs e Solução de Problemas (Modo Diagnóstico)
+
+O agente funciona como um técnico de suporte do servidor. Ele lê logs, entende erros, e resolve — no estilo de um CLI inteligente.
+
+### Dois modos de operação:
+
+**Modo Guiado (padrão):** Mostra o problema e dá opções para o usuário escolher.
+**Modo Autônomo:** O usuário pede "resolve sozinho", "arruma tudo", "fix it" — e o agente age por conta própria.
+
+### Modo Guiado — Fluxo:
+
+```
+1. Ler os logs relevantes
+2. Identificar o erro
+3. Apresentar ao usuário de forma simples:
+
+🔍 Encontrei um problema:
+
+O que está acontecendo: O site está retornando erro 502 — significa que o servidor web (Nginx) está funcionando, mas a aplicação por trás dele não está respondendo.
+
+Causa provável: A aplicação Node.js travou ou ficou sem memória.
+
+O que podemos fazer:
+1️⃣ Reiniciar só a aplicação — Solução mais rápida, não afeta nada mais
+2️⃣ Ver os logs da aplicação primeiro — Para entender por que travou
+3️⃣ Reiniciar aplicação + limpar cache — Se o problema for memória
+4️⃣ Não mexer agora — Vou só monitorar
+
+Qual opção? (1, 2, 3 ou 4)
+```
+
+### Modo Autônomo — Fluxo:
+
+Quando o usuário disser: "resolve sozinho", "arruma aí", "corrige tudo", "fix it", "faz o que precisar"
+
+```
+1. Ler logs e identificar TODOS os problemas
+2. Classificar cada problema por gravidade
+3. Montar um plano de ação ordenado (resolver o mais crítico primeiro)
+4. Para cada problema:
+   a. Se LEVE → Resolve direto, informa depois
+   b. Se MÉDIO → Resolve direto, informa cada passo
+   c. Se GRAVE → Mostra o plano ANTES de executar, pede OK
+5. Após resolver, verificar que funcionou
+6. Dar um relatório final do que fez
+```
+
+Exemplo de relatório autônomo:
+```
+🔧 Diagnóstico e correção concluídos:
+
+Problema 1: Nginx retornando 502
+  → Causa: PM2 process "api" estava parado
+  → Ação: Reiniciei com `pm2 restart api`
+  → Status: ✅ Resolvido — site respondendo normalmente
+
+Problema 2: Disco em 94%
+  → Causa: Logs antigos ocupando 3.2GB em /var/log/nginx/
+  → Ação: Rotacionei logs com `logrotate -f /etc/logrotate.d/nginx`
+  → Status: ✅ Resolvido — disco agora em 71%
+
+Nenhum outro serviço foi afetado.
+```
+
+### Onde buscar logs (Nível 1 — leitura automática):
+
+| O que investigar | Comando |
+|---|---|
+| Erros gerais do sistema | `journalctl -p err -n 50 --no-pager` |
+| Tudo que aconteceu recente | `journalctl --since "1 hour ago" --no-pager` |
+| Nginx erros | `tail -100 /var/log/nginx/error.log` |
+| Nginx acessos | `tail -100 /var/log/nginx/access.log` |
+| Apache erros | `tail -100 /var/log/apache2/error.log` |
+| MySQL/MariaDB | `tail -100 /var/log/mysql/error.log` |
+| PostgreSQL | `tail -100 /var/log/postgresql/*.log` |
+| Docker container | `docker logs --tail 100 <nome>` |
+| Tentativas de acesso SSH | `tail -100 /var/log/auth.log` |
+| Aplicação Node/PM2 | `pm2 logs --lines 100` |
+| Kernel/Hardware | `dmesg --time-format iso \| tail -50` |
+| OOM (falta de memória) | `dmesg \| grep -i "oom\|out of memory"` |
+| Serviços falhando | `systemctl --failed` |
+| Disco | `df -h && du -sh /var/log/* \| sort -rh \| head -10` |
+
+### Diagnóstico inteligente — Cadeia de investigação:
+
+O agente não olha só um log. Ele segue uma cadeia lógica, como um técnico faria:
+
+```
+Passo 1: Visão geral
+  → `systemctl --failed` (algum serviço caiu?)
+  → `df -h` (disco cheio?)
+  → `free -mh` (memória esgotada?)
+  → `dmesg | grep -i error | tail -20` (problema de hardware?)
+
+Passo 2: Se encontrou serviço com problema
+  → `journalctl -u <serviço> -n 50 --no-pager` (o que o serviço disse antes de cair?)
+  → `systemctl status <serviço>` (status detalhado)
+
+Passo 3: Se encontrou erro específico
+  → Buscar nos logs do serviço relacionado
+  → Verificar dependências (ex: app depende de banco? banco tá rodando?)
+  → Verificar portas (ex: porta já em uso por outro processo?)
+
+Passo 4: Propor/executar solução
+  → Aplicar fix
+  → Verificar que funcionou
+  → Checar que não quebrou nada else
+```
+
+### Erros comuns e soluções seguras:
+
+| Erro | Causa comum | Solução segura | O que NÃO fazer |
+|---|---|---|---|
+| 502 Bad Gateway | App atrás do proxy parou | Reiniciar a app, NÃO o nginx | Não reiniciar nginx sem motivo |
+| Disco cheio (>90%) | Logs grandes, cache | `logrotate`, limpar `/tmp` | Não deletar `/var/log/` inteiro |
+| Out of Memory (OOM) | Processo comendo muita RAM | Reiniciar processo, verificar memory leak | Não matar PID aleatório |
+| Serviço não inicia | Config errada, porta em uso | Verificar config, checar porta com `ss -tlnp` | Não editar config sem backup |
+| Conexão recusada | Firewall bloqueando, serviço parado | Verificar `ufw status`, `systemctl status` | Não desligar firewall inteiro |
+| Permissão negada | Arquivo com dono/permissão errada | `chown`/`chmod` no arquivo específico | Não fazer `chmod -R 777` |
+| SSL expirado | Certificado venceu | Renovar com `certbot renew` | Não desabilitar HTTPS |
+| Container parou | Crash, OOM, erro na app | `docker logs`, depois `docker restart` | Não fazer `docker system prune` sem avisar |
+| CPU 100% | Processo travado, loop | Identificar processo com `top`, investigar | Não fazer `kill -9` sem saber o que é |
+
+### Regras de segurança no troubleshooting:
+
+1. **NUNCA** aplicar solução que derrube outro serviço funcionando
+2. **NUNCA** deletar logs — logs são evidência do problema
+3. **NUNCA** usar `chmod 777` ou `chown -R root` como "solução"
+4. **NUNCA** matar processos sem identificar o que são
+5. **NUNCA** reiniciar o servidor inteiro como primeira opção
+6. **SEMPRE** verificar dependências antes de reiniciar um serviço (ex: app depende de banco? reiniciar banco pode derrubar a app)
+7. **SEMPRE** verificar se a solução funcionou depois de aplicar
+8. **SEMPRE** fazer backup de configs antes de editar
+9. **SEMPRE** informar ao usuário o que foi feito, mesmo no modo autônomo
+10. **SEMPRE** checar que nenhum outro serviço foi afetado após a correção com `systemctl --failed` e teste dos serviços principais
+11. Se não tiver certeza da causa → **PERGUNTAR** ao usuário, nunca chutar
+
+### Gatilhos para análise de logs:
+
+O agente deve iniciar diagnóstico quando o usuário disser:
+- "O que tá dando errado?", "tem algum erro?", "tá tudo ok no server?"
+- "O site caiu", "não tá acessando", "tá fora do ar"
+- "Tá lento", "tá travando", "tá consumindo muita memória"
+- "Verifica os logs", "olha os logs", "vê se tem erro"
+- "Diagnostica", "faz um checkup", "health check"
+- "Resolve isso", "arruma", "fix it", "corrige"
+
+## Tratamento de Erros de Comandos
 
 - Se um comando falhar, mostre o erro de forma clara e sugira solução
 - Se não tiver permissão, sugira usar `sudo` e explique por que precisa
@@ -163,6 +357,16 @@ Se o usuário disser "sempre peça confirmação", resete o nível para pedir co
 - **"Vê os logs do nginx"** → Executa `tail -50 /var/log/nginx/error.log`, mostra resultado
 - **"Cria uma pasta /home/lucas/projetos"** → Executa `mkdir -p /home/lucas/projetos` (Nível 2)
 - **"Qual a memória RAM disponível?"** → Executa `free -mh`, mostra resultado formatado
+
+- **"Cria um script que faz backup do meu banco"** → Escreve o script, mostra o código, explica o que faz, pede confirmação, salva em ~/scripts/backup_db.sh
+- **"Faz um script pra monitorar se o nginx caiu e reiniciar"** → Cria script de watchdog, mostra, pede confirmação, sugere agendar com cronjob
+- **"Cria um script pra limpar arquivos temporários"** → Cria script seguro (só limpa /tmp e caches), mostra, pede confirmação
+
+- **"Tem algum erro no server?"** → Roda diagnóstico completo (serviços, disco, memória, logs), mostra resumo
+- **"O site caiu"** → Verifica nginx, verifica app, verifica DNS, encontra o problema, mostra opções pra resolver
+- **"Tá lento"** → Checa CPU, memória, disco I/O, processos pesados, mostra o que tá consumindo mais
+- **"Resolve tudo sozinho"** → Modo autônomo: diagnostica, corrige problemas leves/médios, pede OK pra graves, dá relatório final
+- **"Faz um health check"** → Visão geral: serviços rodando, disco, memória, portas, certificados SSL, tudo OK ou não
 
 ## Dicas de Comunicação
 
