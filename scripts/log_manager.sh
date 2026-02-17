@@ -1,218 +1,115 @@
 #!/usr/bin/env bash
-# log_manager.sh — Gerenciador de logs de execução
-# Uso: bash log_manager.sh --action [today|date|search|last|failures|stats|clean] --log-dir /path
+# Control Server v1.0 — Log Manager
+# Criado por BollaNetwork — https://github.com/luna90b/control-server-skill
+#
+# Uso:
+#   ./log_manager.sh show [type] [lines]    → Mostrar logs (commands|firewall|installs|errors|credentials|all)
+#   ./log_manager.sh search "termo"         → Buscar nos logs
+#   ./log_manager.sh summary [today|week]   → Resumo de atividades
+#   ./log_manager.sh rotate                 → Rotacionar logs antigos (>30 dias)
 
 set -euo pipefail
 
-ACTION=""
-LOG_DIR=""
-DATE_QUERY=""
-SEARCH_QUERY=""
-COUNT=20
-DAYS_KEEP=30
+ACTION="${1:-show}"
+ARG2="${2:-all}"
+ARG3="${3:-50}"
 
-# === PARSE ARGS ===
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --action)    ACTION="$2"; shift 2 ;;
-        --log-dir)   LOG_DIR="$2"; shift 2 ;;
-        --date)      DATE_QUERY="$2"; shift 2 ;;
-        --query)     SEARCH_QUERY="$2"; shift 2 ;;
-        --count)     COUNT="$2"; shift 2 ;;
-        --days-keep) DAYS_KEEP="$2"; shift 2 ;;
-        *) echo "ERRO: Argumento desconhecido: $1"; exit 1 ;;
-    esac
-done
+SKILL_DIR="${HOME}/.openclaw/skills/control-server"
+LOG_DIR="${SKILL_DIR}/logs"
 
-if [ -z "$ACTION" ] || [ -z "$LOG_DIR" ]; then
-    echo "ERRO: --action e --log-dir são obrigatórios"
-    exit 1
-fi
+mkdir -p "$LOG_DIR"
 
-# === AÇÕES ===
-
-action_today() {
-    local today
-    today=$(date '+%Y-%m-%d')
-    local log_file="$LOG_DIR/${today}.log"
-    
-    if [ ! -f "$log_file" ]; then
-        echo "Nenhum log encontrado para hoje ($today)"
-        return 0
-    fi
-    
-    echo "=== Logs de $today ==="
-    cat "$log_file"
-    echo ""
-    echo "=== Total de entradas: $(grep -c '^timestamp:' "$log_file" 2>/dev/null || echo 0) ==="
-}
-
-action_date() {
-    if [ -z "$DATE_QUERY" ]; then
-        echo "ERRO: --date é obrigatório para action=date"
-        exit 1
-    fi
-    
-    local log_file="$LOG_DIR/${DATE_QUERY}.log"
-    
-    if [ ! -f "$log_file" ]; then
-        echo "Nenhum log encontrado para $DATE_QUERY"
-        echo "Datas disponíveis:"
-        ls -1 "$LOG_DIR"/*.log 2>/dev/null | xargs -I{} basename {} .log | sort -r | head -10
-        return 0
-    fi
-    
-    echo "=== Logs de $DATE_QUERY ==="
-    cat "$log_file"
-}
-
-action_search() {
-    if [ -z "$SEARCH_QUERY" ]; then
-        echo "ERRO: --query é obrigatório para action=search"
-        exit 1
-    fi
-    
-    echo "=== Buscando '$SEARCH_QUERY' em todos os logs ==="
-    local found=0
-    
-    for log_file in "$LOG_DIR"/*.log; do
-        if [ -f "$log_file" ]; then
-            local matches
-            matches=$(grep -i "$SEARCH_QUERY" "$log_file" 2>/dev/null || true)
-            if [ -n "$matches" ]; then
+case "$ACTION" in
+    show)
+        TYPE="$ARG2"
+        LINES="$ARG3"
+        
+        if [[ "$TYPE" == "all" ]]; then
+            for f in "$LOG_DIR"/*.log; do
+                [[ -f "$f" ]] || continue
+                echo "=== $(basename "$f") ==="
+                tail -"$LINES" "$f" 2>/dev/null
                 echo ""
-                echo "--- $(basename "$log_file" .log) ---"
-                echo "$matches"
-                found=1
+            done
+        else
+            FILE="$LOG_DIR/${TYPE}.log"
+            if [[ -f "$FILE" ]]; then
+                tail -"$LINES" "$FILE"
+            else
+                echo "Log não encontrado: $TYPE"
+                echo "Disponíveis: $(ls "$LOG_DIR"/*.log 2>/dev/null | xargs -I{} basename {} .log | tr '\n' ', ')"
             fi
         fi
-    done
+        ;;
     
-    if [ $found -eq 0 ]; then
-        echo "Nenhum resultado encontrado para '$SEARCH_QUERY'"
-    fi
-}
-
-action_last() {
-    echo "=== Últimos $COUNT comandos executados ==="
-    
-    # Combinar todos os logs, ordenar por data (mais recentes primeiro)
-    local all_entries=""
-    
-    for log_file in $(ls -1t "$LOG_DIR"/*.log 2>/dev/null); do
-        if [ -f "$log_file" ]; then
-            # Extrair entradas (blocos entre ---)
-            local content
-            content=$(cat "$log_file")
-            all_entries="${all_entries}
-${content}"
+    search)
+        TERM="$ARG2"
+        if [[ -z "$TERM" ]]; then
+            echo "Uso: log_manager.sh search \"termo\""
+            exit 1
         fi
-    done
+        echo "🔍 Buscando \"$TERM\" nos logs..."
+        echo ""
+        grep -rn --color=always "$TERM" "$LOG_DIR"/*.log 2>/dev/null || echo "Nenhum resultado"
+        ;;
     
-    # Mostrar últimas N entradas (cada entrada começa com "---" e termina com "---")
-    echo "$all_entries" | grep -A5 "^timestamp:" | tail -n "$((COUNT * 6))"
-}
-
-action_failures() {
-    echo "=== Comandos que falharam (exit_code != 0) ==="
-    local found=0
-    
-    for log_file in "$LOG_DIR"/*.log; do
-        if [ -f "$log_file" ]; then
-            # Buscar entradas com exit_code diferente de 0
-            local in_block=0
-            local block=""
-            local has_failure=0
-            
-            while IFS= read -r line; do
-                if [ "$line" == "---" ]; then
-                    if [ $in_block -eq 1 ] && [ $has_failure -eq 1 ]; then
-                        echo "$block"
-                        echo "---"
-                        echo ""
-                        found=1
-                    fi
-                    in_block=$((1 - in_block))
-                    block="---"
-                    has_failure=0
-                else
-                    block="${block}
-${line}"
-                    if [[ "$line" =~ ^exit_code:\ *[1-9] ]]; then
-                        has_failure=1
-                    fi
-                fi
-            done < "$log_file"
+    summary)
+        PERIOD="$ARG2"
+        case "$PERIOD" in
+            today)  SINCE=$(date +%Y-%m-%d) ;;
+            week)   SINCE=$(date -d "7 days ago" +%Y-%m-%d 2>/dev/null || date -v-7d +%Y-%m-%d) ;;
+            *)      SINCE=$(date +%Y-%m-%d) ;;
+        esac
+        
+        echo "📋 Resumo de atividades desde $SINCE"
+        echo ""
+        
+        CMD_COUNT=$(grep -c "$SINCE" "$LOG_DIR/commands.log" 2>/dev/null || echo "0")
+        echo "  ⚡ Comandos executados: $CMD_COUNT"
+        
+        FW_COUNT=$(grep -c "$SINCE" "$LOG_DIR/firewall.log" 2>/dev/null || echo "0")
+        echo "  🛡️ Alterações de firewall: $FW_COUNT"
+        
+        INST_COUNT=$(grep -c "$SINCE" "$LOG_DIR/installs.log" 2>/dev/null || echo "0")
+        echo "  📦 Instalações: $INST_COUNT"
+        
+        ERR_COUNT=$(grep -c "$SINCE" "$LOG_DIR/errors.log" 2>/dev/null || echo "0")
+        echo "  ❌ Erros: $ERR_COUNT"
+        
+        CRED_COUNT=$(grep -c "$SINCE" "$LOG_DIR/credentials.log" 2>/dev/null || echo "0")
+        echo "  🔑 Acessos a credenciais: $CRED_COUNT"
+        
+        if [[ $ERR_COUNT -gt 0 ]]; then
+            echo ""
+            echo "  Últimos erros:"
+            grep "$SINCE" "$LOG_DIR/errors.log" 2>/dev/null | tail -5 | while read -r line; do
+                echo "    $line"
+            done
         fi
-    done
+        ;;
     
-    if [ $found -eq 0 ]; then
-        echo "Nenhuma falha encontrada nos logs."
-    fi
-}
-
-action_stats() {
-    echo "=== Estatísticas de Execução ==="
-    echo ""
+    rotate)
+        echo "🔄 Rotacionando logs com mais de 30 dias..."
+        ARCHIVE_DIR="$LOG_DIR/archive"
+        mkdir -p "$ARCHIVE_DIR"
+        
+        for f in "$LOG_DIR"/*.log; do
+            [[ -f "$f" ]] || continue
+            NAME=$(basename "$f")
+            LINES=$(wc -l < "$f")
+            if [[ $LINES -gt 10000 ]]; then
+                # Manter últimas 5000 linhas, arquivar o resto
+                TS=$(date +%Y%m%d)
+                head -n -5000 "$f" >> "$ARCHIVE_DIR/${NAME%.log}_${TS}.log"
+                tail -5000 "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+                echo "  📁 $NAME: arquivou $(( LINES - 5000 )) linhas"
+            fi
+        done
+        echo "✅ Rotação concluída"
+        ;;
     
-    local total_files=0
-    local total_entries=0
-    local total_failures=0
-    local total_size=0
-    
-    for log_file in "$LOG_DIR"/*.log; do
-        if [ -f "$log_file" ]; then
-            total_files=$((total_files + 1))
-            local entries
-            entries=$(grep -c "^timestamp:" "$log_file" 2>/dev/null || echo 0)
-            total_entries=$((total_entries + entries))
-            local failures
-            failures=$(grep -c "^exit_code: [1-9]" "$log_file" 2>/dev/null || echo 0)
-            total_failures=$((total_failures + failures))
-            local size
-            size=$(stat -f%z "$log_file" 2>/dev/null || stat --printf="%s" "$log_file" 2>/dev/null || echo 0)
-            total_size=$((total_size + size))
-        fi
-    done
-    
-    echo "Arquivos de log: $total_files"
-    echo "Total de comandos: $total_entries"
-    echo "Falhas: $total_failures"
-    if [ $total_entries -gt 0 ]; then
-        local success_rate=$(( (total_entries - total_failures) * 100 / total_entries ))
-        echo "Taxa de sucesso: ${success_rate}%"
-    fi
-    echo "Tamanho total: $(numfmt --to=iec $total_size 2>/dev/null || echo "${total_size} bytes")"
-    echo ""
-    echo "Período coberto:"
-    ls -1 "$LOG_DIR"/*.log 2>/dev/null | head -1 | xargs basename 2>/dev/null | sed 's/.log//' | xargs -I{} echo "  Primeiro: {}"
-    ls -1 "$LOG_DIR"/*.log 2>/dev/null | tail -1 | xargs basename 2>/dev/null | sed 's/.log//' | xargs -I{} echo "  Último: {}"
-}
-
-action_clean() {
-    echo "=== Limpando logs com mais de $DAYS_KEEP dias ==="
-    local deleted=0
-    
-    find "$LOG_DIR" -name "*.log" -mtime +"$DAYS_KEEP" -print -delete 2>/dev/null | while read -r f; do
-        echo "Removido: $(basename "$f")"
-        deleted=$((deleted + 1))
-    done
-    
-    echo "Limpeza concluída."
-}
-
-# === DISPATCH ===
-case "$ACTION" in
-    today)    action_today ;;
-    date)     action_date ;;
-    search)   action_search ;;
-    last)     action_last ;;
-    failures) action_failures ;;
-    stats)    action_stats ;;
-    clean)    action_clean ;;
     *)
-        echo "ERRO: Ação '$ACTION' não reconhecida"
-        echo "Ações: today, date, search, last, failures, stats, clean"
+        echo "Uso: log_manager.sh [show|search|summary|rotate]"
         exit 1
         ;;
 esac

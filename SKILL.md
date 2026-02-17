@@ -1,202 +1,327 @@
 ---
 name: control-server
-description: Execute commands on remote or local Linux servers via SSH or locally. Use when user asks to run shell commands, install packages (apt, pip, npm, PostgreSQL, Redis, Nginx, Docker, etc.), configure services, check server status, manage processes, view logs, manage files on servers, setup databases, configure firewalls, or any system administration task. Also triggers when agent needs to execute a command to complete another task, install dependencies, or when any other skill requires server-side execution. Manages credentials securely and maintains execution logs.
-metadata: { "openclaw": { "emoji": "🖥️", "requires": { "bins": ["bash", "ssh"] } } }
+description: "Controle completo do servidor onde o agente roda. Executar comandos, instalar pacotes, gerenciar serviços, firewall UFW, deploy de projetos, DNS, Nginx, PM2, SSL, PostgreSQL, MySQL, Redis, análise de logs, troubleshooting automático, e criação de scripts. Ativa quando o usuário diz: 'seu servidor', 'seu server', 'sua máquina', 'execute', 'instale', 'configure', 'atualize', 'reinicie', 'deploy', 'colocar online', 'firewall', 'abrir porta', 'fechar porta', 'proteger servidor', 'verificar portas', 'banco de dados', 'PostgreSQL', 'MySQL', 'Redis', 'nginx', 'pm2', 'domínio', 'subdomínio', 'DNS', 'SSL', 'certbot', 'logs', 'erro', 'diagnosticar', 'health check', 'cria um script', ou qualquer tarefa de administração do servidor."
+metadata: { "openclaw": { "emoji": "🖥️", "requires": { "bins": ["bash", "ufw", "ss"] } } }
 ---
 
-# Control Server Skill
+# Control Server — V1.0
+
+> **Criado por [BollaNetwork](https://github.com/luna90b)**
+> **Repositório:** https://github.com/luna90b/control-server-skill
+> **Para atualizar:** `cd ~/.openclaw/skills/control-server && git pull`
 
 ## Overview
-Skill para executar comandos em servidores Linux (local ou remoto via SSH). Funciona como a "mão" do agente — qualquer tarefa que exija executar algo no servidor passa por esta skill. Mantém logs de tudo que é executado e gerencia credenciais de forma segura.
 
-**IMPORTANTE:** Esta skill é uma skill de INFRAESTRUTURA. Outras skills podem (e devem) depender dela para executar comandos no servidor. Quando o agente precisa rodar algo no terminal para completar qualquer tarefa, esta skill deve ser utilizada.
+Skill unificada de controle total do servidor. O agente usa esta skill como ponte para executar QUALQUER tarefa que precise rodar na máquina — desde verificar disco até deploy completo com domínio e SSL. Funciona como um DevOps inteligente integrado ao OpenClaw.
 
-## Arquitetura
+**Esta skill é também o "braço" do agente no servidor.** Quando qualquer outra tarefa ou resposta do OpenClaw precisar executar um comando na máquina, esta skill é acionada para fazer isso de forma segura.
 
+## Conceitos Fundamentais
+
+### "Seu servidor" = Esta Máquina
+Expressões que significam o servidor onde o agente roda:
+- "seu servidor", "seu server", "sua máquina", "sua VPS"
+- "no server", "na máquina", "aí no server"
+- Ou simplesmente pedir para executar/instalar algo
+
+### Skill como Ponte
+O agente frequentemente precisa executar comandos para completar tarefas que NÃO são explicitamente "de servidor". Exemplos:
+- Tarefa: "configura o banco pro meu projeto" → Precisa rodar `psql`, `createdb`, etc.
+- Tarefa: "verifica se meu site tá no ar" → Precisa rodar `curl`, `systemctl status`
+- Tarefa: "atualiza meu projeto" → Precisa rodar `git pull`, `npm install`, `pm2 restart`
+
+Nestes casos, o agente usa esta skill internamente sem necessariamente mencionar ao usuário que está "usando a skill de servidor".
+
+## Sistema de Logs — Tudo é Registrado
+
+**TODA ação executada por esta skill é logada.** Sem exceção.
+
+### Localização: `{baseDir}/logs/`
+- `commands.log` — Todo comando executado: timestamp, comando, exit code, quem pediu
+- `installs.log` — Todo pacote/serviço instalado
+- `firewall.log` — Toda alteração de UFW
+- `deploys.log` — Todo deploy realizado
+- `errors.log` — Todo erro encontrado e como foi resolvido
+- `credentials.log` — Todo acesso a credenciais (sem mostrar a senha, só o que foi acessado)
+
+### Formato do log:
 ```
-{baseDir}/
-├── SKILL.md                          # Este arquivo
-├── scripts/
-│   ├── execute.sh                    # Executor principal de comandos
-│   ├── install_service.sh            # Instalador de serviços
-│   ├── credential_manager.sh         # Gerenciador de credenciais
-│   └── log_manager.sh               # Gerenciador de logs
-├── references/
-│   ├── common_services.md            # Guia de instalação de serviços comuns
-│   └── security_practices.md         # Práticas de segurança
-├── data/
-│   ├── logs/                         # Logs de execução (criado automaticamente)
-│   │   └── YYYY-MM-DD.log           # Um arquivo por dia
-│   └── credentials/                  # Credenciais encriptadas
-│       └── .credentials.enc         # Arquivo de credenciais
+[2026-02-17T14:30:00Z] [COMMAND] user_request="instala htop" cmd="apt install htop -y" exit=0 duration=3s
+[2026-02-17T14:31:00Z] [FIREWALL] action="allow" port=3000 proto=tcp comment="Node app" snapshot="20260217_143100"
+[2026-02-17T14:32:00Z] [INSTALL] package="postgresql-16" method="apt" status="success"
+[2026-02-17T14:33:00Z] [CREDENTIAL] action="save" service="postgresql" user="meu_projeto_db" stored_at="vault"
 ```
 
-## Configuração Inicial
+### Regras de log:
+1. **SEMPRE** logar antes e depois de executar
+2. **NUNCA** logar senhas, tokens ou chaves nos logs
+3. Manter logs dos últimos 30 dias (rotacionar automaticamente)
+4. O agente pode consultar logs para entender histórico: "o que foi feito ontem?"
 
-### Primeiro uso — Setup do ambiente
-Na primeira execução, garanta que o diretório de dados existe:
+## Sistema de Credenciais Seguras (Vault)
+
+Credenciais de serviços (banco de dados, APIs, etc.) são salvas de forma segura para o agente reutilizar.
+
+### Localização: `{baseDir}/data/vault.json`
+### Permissões: `chmod 600` (só o dono lê)
+
+### Estrutura:
+```json
+{
+  "services": {
+    "postgresql": {
+      "host": "localhost",
+      "port": 5432,
+      "databases": {
+        "meu_projeto": {
+          "db_name": "meu_projeto_db",
+          "user": "meu_projeto_user",
+          "password": "ENCRYPTED_OR_REFERENCE",
+          "created_at": "2026-02-17",
+          "used_by": ["meu-projeto-api"]
+        }
+      }
+    },
+    "mysql": { ... },
+    "redis": {
+      "host": "localhost",
+      "port": 6379,
+      "password": "ENCRYPTED_OR_REFERENCE",
+      "databases": { ... }
+    }
+  },
+  "api_keys": {
+    "projeto-x": {
+      "key_name": "API_KEY",
+      "env_var": "PROJETO_X_API_KEY",
+      "stored_in": "env_file",
+      "path": "/home/lucas/projects/projeto-x/.env"
+    }
+  }
+}
+```
+
+### Regras do vault:
+1. **NUNCA** mostrar senhas em texto claro na conversa — usar `****` ou referência
+2. **SEMPRE** `chmod 600` no vault.json após alterar
+3. Quando o agente precisar de uma credencial, buscar no vault PRIMEIRO
+4. Se não existir, perguntar ao usuário ou gerar automaticamente
+5. Senhas geradas automaticamente: mínimo 24 chars, alfanumérico + especiais
+6. **SEMPRE** logar acesso ao vault (sem mostrar a senha)
+
+### Como o agente usa o vault:
+```
+Agente precisa conectar no PostgreSQL do projeto X
+  → Lê vault.json → encontra credenciais
+  → Usa para executar comandos psql
+  → Loga: "[CREDENTIAL] action=read service=postgresql db=meu_projeto_db"
+```
+
+## Níveis de Confiança para Comandos
+
+### Nível 1 — Leitura (auto após 3 aprovações)
+`ls`, `cat`, `head`, `tail`, `grep`, `find`, `df -h`, `free -m`, `uptime`, `systemctl status`, `docker ps`, `docker logs`, `ip a`, `ping`, `curl -I`, `ps aux`, `ss -tlnp`, `pm2 list`, `pm2 logs`, `nginx -t`
+
+### Nível 2 — Instalação leve (auto após 10 aprovações)
+`apt install`, `apt update`, `pip install`, `npm install`, `mkdir`, `cp`, `mv`, `chmod`, `chown` (em pastas do projeto), `systemctl restart`, `docker restart`, `pm2 restart`
+
+### Nível 3 — Alteração de sistema (SEMPRE confirmação)
+`apt upgrade`, `systemctl enable/disable`, editar `/etc/`, criar usuários, firewall, cronjobs, configurar serviços (PostgreSQL, Nginx, etc.)
+
+### Nível 4 — Alto risco (SEMPRE confirmação + impacto)
+`systemctl stop` serviço crítico, `reboot`, `rm` em projetos, `docker system prune`
+
+### Nível 5 — PROIBIDO (nunca, sem exceção)
+`rm -rf /` e variantes, `mkfs`, `dd` em dispositivos, fork bomb, `chmod -R 777 /`, fechar SSH, desabilitar acesso remoto, deletar `/var/log/`, `curl | bash`
+
+## Instalação e Configuração de Serviços
+
+### PostgreSQL
+
+**Instalar:**
 ```bash
-mkdir -p {baseDir}/data/logs {baseDir}/data/credentials
-chmod 700 {baseDir}/data/credentials
+apt install postgresql postgresql-contrib -y
+systemctl enable postgresql
+systemctl start postgresql
 ```
 
-### Conexão SSH (para servidores remotos)
-Se o servidor for remoto, o agente deve ter acesso SSH configurado. Verifique:
+**Criar banco para projeto:**
 ```bash
-ssh -o ConnectTimeout=5 -o BatchMode=yes USER@HOST "echo ok"
+# Gerar senha segura
+PASSWORD=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)
+
+# Criar user e banco
+sudo -u postgres psql -c "CREATE USER nome_user WITH PASSWORD '$PASSWORD';"
+sudo -u postgres psql -c "CREATE DATABASE nome_db OWNER nome_user;"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE nome_db TO nome_user;"
+
+# Salvar no vault
+# Logar criação
 ```
 
-### Servidor local
-Para comandos locais, execute diretamente sem SSH.
+**Após instalar:** Salvar credenciais no vault, logar em installs.log, informar usuário.
 
-## Instruções Principais
+### MySQL / MariaDB
 
-### 1. Executar Comando no Servidor
-
-**Para QUALQUER comando que precise ser executado:**
-
-1. Determine se é local ou remoto
-2. Execute usando o script executor:
+**Instalar:**
 ```bash
-bash {baseDir}/scripts/execute.sh --mode [local|ssh] --host [HOST] --user [USER] --cmd "COMANDO_AQUI" --log-dir {baseDir}/data/logs
+apt install mariadb-server -y
+systemctl enable mariadb
+systemctl start mariadb
+mysql_secure_installation  # Guiar usuário interativamente
 ```
 
-3. O script automaticamente:
-   - Registra o comando, timestamp, e resultado no log
-   - Captura stdout e stderr
-   - Retorna o exit code
-   - Formata a saída para o agente
-
-**Se o script não estiver disponível, execute manualmente e registre:**
+**Criar banco:**
 ```bash
-# Executar
-RESULTADO=$(COMANDO_AQUI 2>&1)
-EXIT_CODE=$?
-
-# Registrar no log
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] CMD: COMANDO_AQUI | EXIT: $EXIT_CODE | OUTPUT: $RESULTADO" >> {baseDir}/data/logs/$(date '+%Y-%m-%d').log
+PASSWORD=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)
+mysql -u root -e "CREATE DATABASE nome_db;"
+mysql -u root -e "CREATE USER 'nome_user'@'localhost' IDENTIFIED BY '$PASSWORD';"
+mysql -u root -e "GRANT ALL PRIVILEGES ON nome_db.* TO 'nome_user'@'localhost';"
+mysql -u root -e "FLUSH PRIVILEGES;"
 ```
 
-### 2. Instalar Serviços e Pacotes
+### Redis
 
-Para instalar qualquer serviço, use o script de instalação:
+**Instalar:**
 ```bash
-bash {baseDir}/scripts/install_service.sh --service [NOME] --log-dir {baseDir}/data/logs --cred-dir {baseDir}/data/credentials
+apt install redis-server -y
+systemctl enable redis-server
+# Configurar senha:
+# Editar /etc/redis/redis.conf → requirepass <senha>
+systemctl restart redis-server
 ```
 
-Serviços suportados pelo script: `postgresql`, `redis`, `nginx`, `docker`, `nodejs`, `python3`, `certbot`, `ufw`, `fail2ban`, `pm2`
-
-Para pacotes avulsos:
+### Node.js (via nvm)
 ```bash
-bash {baseDir}/scripts/execute.sh --mode local --cmd "sudo apt-get update && sudo apt-get install -y PACOTE" --log-dir {baseDir}/data/logs
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+source ~/.bashrc
+nvm install 20
+nvm alias default 20
+npm install -g pm2
 ```
 
-**APÓS instalar qualquer serviço que gere credenciais**, salve-as:
+### Nginx
 ```bash
-bash {baseDir}/scripts/credential_manager.sh --action save --service NOME --key "CHAVE" --value "VALOR" --cred-dir {baseDir}/data/credentials
+apt install nginx -y
+systemctl enable nginx
 ```
 
-Para detalhes de instalação de cada serviço, consulte: `{baseDir}/references/common_services.md`
-
-### 3. Gerenciar Credenciais
-
-**Salvar credencial:**
+### Certbot (SSL)
 ```bash
-bash {baseDir}/scripts/credential_manager.sh --action save --service "postgresql" --key "password" --value "SENHA_AQUI" --cred-dir {baseDir}/data/credentials
+apt install certbot python3-certbot-nginx -y
 ```
 
-**Recuperar credencial:**
+### Regras para instalação de serviços:
+1. **SEMPRE** Nível 3 — pedir confirmação
+2. **SEMPRE** habilitar no systemd (`enable`)
+3. **SEMPRE** salvar credenciais no vault
+4. **SEMPRE** logar em `installs.log`
+5. **SEMPRE** verificar se já está instalado antes
+6. Para bancos: **SEMPRE** gerar senha forte automaticamente
+7. Para bancos: **NUNCA** abrir porta pro mundo no UFW (só localhost)
+
+## Firewall (UFW) com Guardian
+
+### Pipeline de segurança — todo comando UFW passa por:
+```
+1. SIMULATE → Testar se é seguro (sem executar)
+2. SNAPSHOT → Salvar estado atual
+3. EXECUTE  → Rodar comando
+4. VALIDATE → Verificar SSH + OpenClaw intactos
+   → Se quebrou → AUTO-FIX instantâneo
+```
+
+### Detecção automática antes de qualquer alteração:
 ```bash
-bash {baseDir}/scripts/credential_manager.sh --action get --service "postgresql" --key "password" --cred-dir {baseDir}/data/credentials
+# Porta SSH real (lê sshd_config + processo)
+SSH_PORT=$(grep -oP '^\s*Port\s+\K[0-9]+' /etc/ssh/sshd_config 2>/dev/null || echo "22")
+
+# OpenClaw Gateway (SÓ LEITURA do config, NUNCA alterar)
+GW_PORT=$(grep -oP '"port"\s*:\s*\K[0-9]+' ~/.openclaw/openclaw.json 2>/dev/null || echo "18789")
+GW_BIND=$(grep -oP '"bind"\s*:\s*"\K[^"]+' ~/.openclaw/openclaw.json 2>/dev/null || echo "loopback")
 ```
 
-**Listar serviços com credenciais salvas:**
-```bash
-bash {baseDir}/scripts/credential_manager.sh --action list --cred-dir {baseDir}/data/credentials
+### BLOQUEADO (nunca executa):
+- Fechar porta SSH
+- Fechar porta do OpenClaw Gateway (se exposta)
+- `default deny outgoing`
+
+### Relação com OpenClaw — SÓ LEITURA:
+- ✅ Ler `~/.openclaw/openclaw.json` para detectar porta/bind
+- ❌ NUNCA alterar qualquer arquivo em `~/.openclaw/`
+- ❌ NUNCA mexer no systemd do OpenClaw
+- ❌ NUNCA matar processos do OpenClaw
+
+## Análise de Logs e Troubleshooting
+
+### Dois modos:
+
+**Guiado:** Mostra problema, explica, dá opções numeradas para escolher.
+**Autônomo:** "Resolve sozinho" — corrige problemas leves/médios direto, mostra plano para graves.
+
+### Cadeia de investigação:
+```
+1. systemctl --failed (serviços caídos?)
+2. df -h (disco cheio?)
+3. free -mh (memória esgotada?)
+4. dmesg | grep error (hardware?)
+5. → Se achou problema → investigar logs específicos do serviço
+6. → Propor/executar solução
+7. → Verificar que funcionou
+8. → Checar que nada mais quebrou
 ```
 
-**Remover credencial:**
-```bash
-bash {baseDir}/scripts/credential_manager.sh --action delete --service "postgresql" --key "password" --cred-dir {baseDir}/data/credentials
-```
+### Regras de troubleshooting:
+- **NUNCA** deletar logs como "solução"
+- **NUNCA** `kill -9` sem saber o que é o processo
+- **NUNCA** reiniciar servidor inteiro como primeira opção
+- **SEMPRE** verificar dependências antes de reiniciar serviço
+- **SEMPRE** informar o que foi feito
 
-### 4. Consultar Logs
+## Criação de Scripts
 
-**Ver logs de hoje:**
-```bash
-bash {baseDir}/scripts/log_manager.sh --action today --log-dir {baseDir}/data/logs
-```
+Salvar em `~/scripts/`. Regras:
+1. Mostrar código completo antes de salvar
+2. Explicar o que faz em linguagem simples
+3. Pedir confirmação antes de salvar e executar
+4. `chmod +x` após salvar
+5. Comentário no topo explicando o que faz
+6. NUNCA criar em pastas do sistema
+7. NUNCA senhas hardcoded — usar variáveis de ambiente ou vault
 
-**Ver logs de uma data:**
-```bash
-bash {baseDir}/scripts/log_manager.sh --action date --date "2026-02-17" --log-dir {baseDir}/data/logs
-```
+## Configuração Persistente
 
-**Buscar nos logs:**
-```bash
-bash {baseDir}/scripts/log_manager.sh --action search --query "postgresql" --log-dir {baseDir}/data/logs
-```
+`{baseDir}/data/server_config.json` — Salva informações do servidor para reusar:
+- IP externo, usuário, pasta de projetos
+- Domínios e wildcard DNS configurados
+- Projetos ativos com porta, domínio, PM2 name
+- Serviços instalados e status
 
-**Ver últimos N comandos:**
-```bash
-bash {baseDir}/scripts/log_manager.sh --action last --count 10 --log-dir {baseDir}/data/logs
-```
+Na primeira interação perguntar informações básicas. Depois usar automaticamente.
 
-**Ver comandos que falharam:**
-```bash
-bash {baseDir}/scripts/log_manager.sh --action failures --log-dir {baseDir}/data/logs
-```
+## Segurança — Diretórios Protegidos
 
-### 5. Interpretar Respostas e Tomar Ações
+**NUNCA deletar ou alterar recursivamente:**
+`/bin /boot /dev /etc /lib /lib64 /proc /root /sbin /sys /usr /var /opt /snap`
 
-O agente DEVE analisar a saída de cada comando antes de reportar ao usuário:
+**NUNCA alterar:**
+`~/.openclaw/` (SÓ LEITURA para detecção)
 
-- **Exit code 0** → Sucesso. Reporte o resultado relevante.
-- **Exit code != 0** → Falha. Analise o stderr para entender o erro.
-- **"Permission denied"** → Tente com `sudo` se apropriado.
-- **"command not found"** → O pacote não está instalado. Instale-o primeiro.
-- **"Connection refused"** → O serviço não está rodando. Inicie-o.
-- **"No space left on device"** → Disco cheio. Informe ao usuário.
-- **"Could not resolve hostname"** → Problema de DNS/rede.
+**Operações permitidas (com confirmação):**
+`/home/<user>/`, `/tmp/`, diretórios de projetos, `/srv/`
 
-**Fluxo de auto-correção:**
-1. Execute o comando
-2. Se falhar, analise o erro
-3. Tente corrigir automaticamente (instalar dependência, iniciar serviço, etc.)
-4. Re-execute o comando original
-5. Se falhar novamente, reporte ao usuário com diagnóstico claro
+## Exemplos de Interação
 
-## Comportamento Esperado
+- **"Quanto de disco tá usando?"** → `df -h` (Nível 1)
+- **"Instala PostgreSQL"** → Instala, configura, gera senha, salva no vault
+- **"Cria banco pro meu projeto"** → Cria user + db, salva credenciais, mostra .env
+- **"Protege meu servidor"** → Guardian scan → setup UFW seguro
+- **"Deploy github.com/user/app"** → Clone → install → build → PM2 → Nginx → SSL
+- **"O site caiu"** → Diagnóstico completo → opções ou fix autônomo
+- **"Qual a senha do banco do projeto X?"** → Busca no vault → mostra referência
+- **"Cria script de backup"** → Mostra código → confirmação → salva em ~/scripts/
+- **"O que foi feito ontem no server?"** → Consulta logs → resumo
 
-- SEMPRE registre cada comando executado no log, sem exceção
-- SEMPRE verifique o exit code após cada comando
-- SEMPRE salve credenciais geradas durante instalações (senhas de banco, API keys, etc.)
-- SEMPRE use esta skill quando outra skill precisar executar algo no servidor
-- NUNCA exiba senhas ou credenciais diretamente ao usuário — referencie onde estão salvas
-- NUNCA execute `rm -rf /` ou comandos destrutivos sem confirmação explícita do usuário
-- NUNCA armazene credenciais em texto puro fora do sistema de credenciais
-- Se um comando falhar, TENTE diagnosticar e corrigir antes de reportar o erro
-- Se precisar de sudo, use `sudo` no comando (não troque de usuário)
-- Para operações destrutivas (delete, drop, purge), SEMPRE confirme com o usuário antes
-
-## Exemplos de Uso
-
-### Por comando direto do usuário:
-- "Instala PostgreSQL no servidor" → Executa `install_service.sh --service postgresql`, salva credenciais, confirma
-- "Verifica se o nginx está rodando" → Executa `systemctl status nginx`, interpreta e reporta
-- "Mostra os logs de ontem" → Executa `log_manager.sh --action date --date ONTEM`
-- "Qual a senha do PostgreSQL?" → Recupera via `credential_manager.sh --action get`
-- "Reinicia o Redis" → Executa `systemctl restart redis`, verifica status após
-
-### Por necessidade de outra skill:
-- Skill de deploy precisa rodar `docker-compose up` → Usa esta skill para executar
-- Skill de monitoramento precisa de `htop` instalado → Usa esta skill para instalar
-- Skill de backup precisa de `pg_dump` → Usa esta skill para executar o dump
-
-### Auto-correção:
-- Comando falha com "command not found" → Instala o pacote → Re-executa
-- Serviço não responde → Verifica status → Reinicia → Re-tenta operação
-
-## Referências Detalhadas
-- Guia de instalação de serviços comuns: `{baseDir}/references/common_services.md`
-- Práticas de segurança: `{baseDir}/references/security_practices.md`
+## Referências
+- Comandos comuns: `{baseDir}/references/common_commands.md`
+- Para atualizar skill: `cd {baseDir} && git pull` ou veja https://github.com/luna90b/control-server-skill
